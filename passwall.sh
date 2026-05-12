@@ -154,10 +154,29 @@ OLD_VER="$(opkg status luci-app-passwall 2>/dev/null | sed -n 's/^Version: //p' 
 log "当前已安装版本: ${OLD_VER:-not installed}"
 log "按接近手动 IPK 的方式安装 / 更新 PassWall"
 
+install_lyaml_fallback() {
+    case "$SUPPORTED_RELEASE" in
+        24.10)
+            dep_base="https://downloads.openwrt.org/releases/${REL_RAW}/packages/${ARCH}/packages"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    libyaml_ipk="/tmp/libyaml_0.2.5-r1_${ARCH}.ipk"
+    lyaml_ipk="/tmp/lyaml_6.2.7-r2_${ARCH}.ipk"
+
+    log "软件源安装 lyaml 失败，尝试直接下载依赖 IPK"
+    download_file "${dep_base}/libyaml_0.2.5-r1_${ARCH}.ipk" "$libyaml_ipk" || return 1
+    download_file "${dep_base}/lyaml_6.2.7-r2_${ARCH}.ipk" "$lyaml_ipk" || return 1
+    opkg install "$libyaml_ipk" "$lyaml_ipk"
+}
+
 if ! opkg list-installed lyaml 2>/dev/null | grep -q '^lyaml -'; then
     log "安装依赖: lyaml"
     opkg update || warn "opkg update 失败，将继续尝试安装已缓存的软件源依赖"
-    opkg install lyaml || die "安装依赖 lyaml 失败。请检查系统软件源是否启用 packages 源，或手动执行: opkg update && opkg install lyaml"
+    opkg install lyaml || install_lyaml_fallback || die "安装依赖 lyaml 失败。请检查系统软件源是否启用 packages 源，或手动执行: opkg update && opkg install lyaml"
 fi
 
 MAIN_IPK="$(download_pkg_from_dir luci-app-passwall passwall_luci)" || die "下载 luci-app-passwall 失败，请检查当前系统版本/架构是否存在对应构建，或稍后重试。"
