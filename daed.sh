@@ -283,12 +283,25 @@ install_luci_daed() {
                 warn "部分 LuCI DAED 依赖安装失败，将继续尝试安装 Release 包"
             if apk info -e daed >/dev/null 2>&1; then
                 [ ! -x "$DAED_INIT" ] || "$DAED_INIT" stop >/dev/null 2>&1 || true
-                log "重新安装 OpenWrt daed APK 核心"
-                apk del --force-broken-world daed ||
+                log "移除旧版 OpenWrt daed 与 LuCI APK"
+                set -- daed
+                for PACKAGE in luci-app-daed luci-i18n-daed-zh-cn; do
+                    if apk info -e "$PACKAGE" >/dev/null 2>&1; then
+                        set -- "$@" "$PACKAGE"
+                    fi
+                done
+                apk del --force-broken-world "$@" ||
                     die "移除现有 daed APK 失败，无法恢复 OpenWrt 专用核心"
+                if apk info -e daed >/dev/null 2>&1; then
+                    die "旧版 daed APK 仍被依赖保留，无法安全替换核心"
+                fi
+                [ ! -e "$DAED_BIN" ] ||
+                    die "移除旧版 daed APK 后核心文件仍存在，无法确认新核心会覆盖"
             fi
             apk add --allow-untrusted "$CORE_PKG" "$LUCI_PKG" "$I18N_PKG" ||
                 die "安装 OpenWrt daed 与 LuCI Release 包失败"
+            apk info -e daed >/dev/null 2>&1 ||
+                die "OpenWrt daed APK 安装后未登记到包管理器"
             ;;
     esac
 }
@@ -755,6 +768,7 @@ main() {
         uci set daed.config.enabled='1'
         uci commit daed
         "$DAED_INIT" enable
+        : > /var/log/daed/daed.log
         "$DAED_INIT" restart || {
             disable_failed_daed
             die "daed 服务启动失败，可执行 logread -e daed 查看日志"
