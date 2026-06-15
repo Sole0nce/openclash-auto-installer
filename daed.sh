@@ -297,6 +297,25 @@ daed_is_running() {
     pidof daed >/dev/null 2>&1
 }
 
+diagnose_daed_failure() {
+    LOG_FILE="/var/log/daed/daed.log"
+    [ -s "$LOG_FILE" ] || return 0
+
+    if tail -n 50 "$LOG_FILE" |
+        grep -q 'program local_tcp_sockops:.*program of this type cannot use helper bpf_get_current_task'; then
+        warn "检测到旧版 dae eBPF 对象不兼容当前内核：local_tcp_sockops 无法使用 bpf_get_current_task"
+        warn "该问题无法通过 vmlinux-btf 修复；请重新运行最新安装脚本以强制更新 OpenWrt daed APK 核心"
+    fi
+}
+
+disable_failed_daed() {
+    uci -q set daed.config.enabled='0' || true
+    uci -q commit daed || true
+    [ ! -x "$DAED_INIT" ] || "$DAED_INIT" stop >/dev/null 2>&1 || true
+    [ ! -x "$DAED_INIT" ] || "$DAED_INIT" disable >/dev/null 2>&1 || true
+    warn "已取消启用 daed，避免不兼容核心持续崩溃重启"
+}
+
 verify_daed_started() {
     sleep 3
     if daed_is_running; then
@@ -304,6 +323,7 @@ verify_daed_started() {
     fi
 
     warn "daed 启动后立即退出"
+    diagnose_daed_failure
     if [ -s /var/log/daed/daed.log ]; then
         warn "最近的 daed 日志:"
         tail -n 20 /var/log/daed/daed.log >&2 || true
@@ -621,6 +641,14 @@ EOF_CONFIG
     touch /var/log/daed/daed.log
 }
 
+limit_daed_respawn() {
+    [ -f "$DAED_INIT" ] || return 0
+
+    if grep -q '^[[:space:]]*procd_set_param respawn[[:space:]]*$' "$DAED_INIT"; then
+        sed -i 's/^[[:space:]]*procd_set_param respawn[[:space:]]*$/    procd_set_param respawn 3600 5 5/' "$DAED_INIT"
+    fi
+}
+
 refresh_luci() {
     rm -rf /tmp/luci-* /tmp/.luci* /tmp/etc/config/ucitrack /var/run/luci-indexcache 2>/dev/null || true
     if [ -x /etc/init.d/rpcd ]; then
@@ -716,18 +744,25 @@ main() {
     else
         install_daed "$ASSET_ARCH" "$LATEST_TAG"
     fi
+    limit_daed_respawn
     uci set daed.config.enabled="$DAED_ENABLED_BEFORE"
     uci commit daed
     refresh_luci
     NEW_VER="$("$DAED_BIN" --version 2>/dev/null | awk '{print $NF}' | head -n1 || true)"
     log "安装后版本: ${NEW_VER:-unknown}"
 
-    if [ "$START_AFTER_INSTALL" = "1" ]; then
+    if [ "$START_AFTER_INSTALL" = "1" ] || [ "$DAED_ENABLED_BEFORE" = "1" ]; then
         uci set daed.config.enabled='1'
         uci commit daed
         "$DAED_INIT" enable
-        "$DAED_INIT" restart || die "daed 服务启动失败，可执行 logread -e daed 查看日志"
-        verify_daed_started || die "daed 无法保持运行，请根据上方日志检查 BTF/eBPF 兼容性"
+        "$DAED_INIT" restart || {
+            disable_failed_daed
+            die "daed 服务启动失败，可执行 logread -e daed 查看日志"
+        }
+        verify_daed_started || {
+            disable_failed_daed
+            die "daed 无法保持运行，请根据上方日志检查核心版本和 eBPF 兼容性"
+        }
         log "daed 服务已启用并启动"
     else
         log "daed 安装完成，LuCI '启用' 选项默认未勾选；请在 '服务 -> DAED' 中手动启用"
